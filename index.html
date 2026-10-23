@@ -1,0 +1,642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="CacheOps shows what missed prompt caching costs you in Claude Code, explains why, and fixes what it can.">
+<title>How CacheOps Works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: corporate single-column bands (white / warm grey) with a sticky top bar; maroon carries every action and every "cold cache" moment. */
+:root {
+  color-scheme: light;
+  --bg: #ffffff; --band: #f7f5f4; --ink: #1f1a1b; --muted: #5f5658; --faint: #8b8183; --line: #e6dfde;
+  --maroon: #6b1626; --maroon-deep: #4b0e19; --maroon-tint: #f4e9eb; --rose: #d9b8bf; --ok: #3f6b52; --ok-tint: #e7f0ea;
+  --sans: "IBM Plex Sans", "Segoe UI", Helvetica, Arial, sans-serif;
+  --mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans); }
+.inner { max-width: 1080px; margin: 0 auto; padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px)); }
+.band { padding-block: 72px; }
+.band.alt { background: var(--band); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+h1, h2, h3 { margin: 0; line-height: 1.2; text-wrap: balance; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2rem, 4.6vw, 3.1rem); letter-spacing: -0.02em; }
+h2 { font-size: clamp(1.55rem, 3vw, 2rem); }
+h3 { font-size: 1.05rem; }
+p { margin: 0; max-width: 66ch; }
+.kicker { font: 600 0.75rem/1 var(--sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--maroon); }
+.section-head { display: grid; gap: 12px; margin-bottom: 32px; }
+.section-head p { color: var(--muted); font-size: 1.05rem; }
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+code { background: var(--maroon-tint); color: var(--maroon-deep); padding: 1px 6px; border-radius: 3px; }
+:focus-visible { outline: 2px solid var(--maroon); outline-offset: 2px; }
+
+/* top bar */
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: rgba(255,255,255,0.96); border-bottom: 1px solid var(--line); }
+.topbar .inner { display: flex; align-items: center; gap: 24px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.05rem; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
+.brand svg { flex: none; }
+.nav { display: flex; gap: 22px; margin-left: auto; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 0.92rem; font-weight: 500; }
+.nav a:hover { color: var(--maroon); }
+@media (max-width: 760px) { .nav { display: none; } }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; gap: 8px; font: 600 0.95rem var(--sans); padding: 11px 18px; border-radius: 4px; border: 1px solid var(--maroon); text-decoration: none; cursor: pointer; }
+.btn.primary { background: var(--maroon); color: #fff; }
+.btn.primary:hover { background: var(--maroon-deep); }
+.btn.ghost { background: #fff; color: var(--maroon); }
+.btn.ghost:hover { background: var(--maroon-tint); }
+
+/* hero */
+.hero { padding-block: 64px 56px; }
+.hero .inner { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 48px; align-items: center; }
+.hero-copy { display: grid; gap: 20px; }
+.hero-copy .lede { font-size: 1.15rem; color: var(--muted); }
+.cta-row { display: flex; flex-wrap: wrap; gap: 12px; }
+.statement { border: 1px solid var(--line); border-radius: 6px; background: #fff; box-shadow: 0 1px 2px rgba(60,20,25,0.05); }
+.statement header { display: flex; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 0.85rem; color: var(--muted); }
+.statement header b { color: var(--ink); font-weight: 600; }
+.statement dl { margin: 0; padding: 6px 18px 10px; }
+.statement .row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); font-size: 0.95rem; }
+.statement .row:last-child { border-bottom: 0; }
+.statement dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.statement .total { display: flex; justify-content: space-between; padding: 14px 18px; background: var(--maroon); color: #fff; border-radius: 0 0 6px 6px; font-weight: 600; }
+.statement .total span:last-child { font-family: var(--mono); }
+@media (max-width: 860px) { .hero .inner { grid-template-columns: minmax(0, 1fr); } }
+
+/* architecture */
+.arch { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 32px; align-items: start; }
+@media (max-width: 900px) { .arch { grid-template-columns: minmax(0, 1fr); } }
+.diagram-wrap { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.diagram { display: block; width: 100%; min-width: 620px; height: auto; }
+.node rect { fill: #fff; stroke: var(--line); stroke-width: 1.5; transition: stroke 0.4s, fill 0.4s; }
+.node text { fill: var(--ink); font: 600 15px var(--sans); }
+.node text.sub { fill: var(--faint); font: 400 12.5px var(--sans); }
+.node.lit rect { stroke: var(--maroon); fill: var(--maroon-tint); }
+.node.cacheops rect { fill: var(--maroon); stroke: var(--maroon); }
+.node.cacheops text { fill: #fff; }
+.node.cacheops text.sub { fill: var(--rose); }
+.node.cacheops.lit rect { fill: var(--maroon-deep); }
+.link { fill: none; stroke: var(--line); stroke-width: 2; transition: stroke 0.4s; }
+.link.lit { stroke: var(--maroon); stroke-dasharray: 7 7; animation: flow 0.9s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: -14; } }
+.zone { fill: none; stroke: var(--rose); stroke-width: 1.2; stroke-dasharray: 4 5; }
+.zone-label { fill: var(--maroon); font: 600 11.5px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; }
+.arrowhead { fill: var(--line); transition: fill 0.4s; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; counter-reset: step; }
+.steps button { width: 100%; text-align: left; display: grid; grid-template-columns: 28px 1fr; gap: 12px; padding: 12px 14px; border: 1px solid transparent; border-radius: 5px; background: transparent; font: inherit; color: var(--muted); cursor: pointer; counter-increment: step; }
+.steps button::before { content: counter(step); width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--line); display: grid; place-items: center; font: 600 0.85rem var(--sans); color: var(--faint); }
+.steps button strong { display: block; color: var(--ink); font-weight: 600; }
+.steps button span { font-size: 0.92rem; }
+.steps button[aria-current="step"] { background: #fff; border-color: var(--line); box-shadow: 0 1px 2px rgba(60,20,25,0.05); }
+.steps button[aria-current="step"]::before { background: var(--maroon); border-color: var(--maroon); color: #fff; }
+.player { display: flex; gap: 10px; align-items: center; margin-top: 14px; color: var(--muted); font-size: 0.88rem; }
+.player button { font: 600 0.85rem var(--sans); padding: 6px 12px; border-radius: 4px; border: 1px solid var(--line); background: #fff; color: var(--ink); cursor: pointer; }
+
+/* simulator */
+.sim { background: #fff; border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 1px 2px rgba(60,20,25,0.05); }
+.sim-controls { display: grid; gap: 18px; padding: 22px; border-bottom: 1px solid var(--line); }
+.field { display: grid; gap: 8px; }
+.field > span { font-size: 0.8rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips button { font: 500 0.92rem var(--sans); padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--ink); cursor: pointer; }
+.chips button:hover { border-color: var(--maroon); }
+.chips button[aria-pressed="true"] { background: var(--maroon); border-color: var(--maroon); color: #fff; }
+.row-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 18px; }
+select { font: 500 0.95rem var(--sans); padding: 9px 12px; border: 1px solid var(--line); border-radius: 4px; background: #fff; color: var(--ink); width: 100%; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; width: fit-content; }
+.seg button { font: 500 0.92rem var(--sans); padding: 8px 16px; border: 0; background: #fff; color: var(--ink); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--maroon); color: #fff; }
+.toggle { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; cursor: pointer; width: fit-content; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--maroon); }
+.sim-body { padding: 22px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.story { font-size: 1.02rem; color: var(--ink); min-height: 3.2em; }
+.chart-wrap { position: relative; overflow-x: clip; overflow-y: visible; }
+.chart { display: flex; align-items: flex-end; gap: 6px; height: 220px; padding-top: 28px; border-bottom: 1px solid var(--ink); position: relative; }
+.req { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; position: relative; min-width: 0; }
+.req .bar { width: 100%; max-width: 34px; border-radius: 2px 2px 0 0; background: var(--rose); transform-origin: bottom; transform: scaleY(0); animation: grow 0.45s ease-out forwards; }
+.req.miss .bar { background: var(--maroon); }
+.req.first .bar { background: #c9c0c1; }
+.req.compact .bar { background: var(--ok); }
+.req .tag { position: absolute; bottom: calc(100% + 0px); font: 600 10.5px var(--sans); color: var(--maroon); white-space: nowrap; opacity: 0; animation: fade 0.3s ease-out forwards; }
+.req .tip { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); max-width: 220px; white-space: normal; width: max-content; background: var(--ink); color: #fff; font-size: 0.8rem; line-height: 1.4; padding: 8px 10px; border-radius: 4px; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 2; }
+.req:hover .tip, .req:focus .tip { opacity: 1; }
+.req.edge-l .tip { left: 0; transform: none; }
+.req.edge-r .tip { left: auto; right: 0; transform: none; }
+.gapmark { flex: 0 0 auto; align-self: stretch; display: flex; align-items: flex-end; justify-content: center; width: clamp(40px, 9vw, 64px); border-left: 1px dashed var(--rose); border-right: 1px dashed var(--rose); background: repeating-linear-gradient(135deg, transparent 0 6px, var(--maroon-tint) 6px 8px); }
+.gapmark span { font: 600 11px var(--sans); color: var(--maroon); padding-bottom: 6px; text-align: center; line-height: 1.25; }
+@keyframes grow { to { transform: scaleY(1); } }
+@keyframes fade { to { opacity: 1; } }
+.axis { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--faint); gap: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.85rem; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.figure { background: #fff; padding: 14px 16px; display: grid; gap: 2px; }
+.figure span { font-size: 0.82rem; color: var(--muted); }
+.figure b { font: 600 1.35rem var(--mono); font-variant-numeric: tabular-nums; }
+.figure.loss b { color: var(--maroon); }
+.verdict { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; padding: 16px; border-left: 3px solid var(--maroon); background: var(--maroon-tint); border-radius: 0 5px 5px 0; }
+.verdict .mono { color: var(--maroon-deep); font-weight: 500; }
+.verdict p { color: var(--ink); }
+.verdict.clean { border-left-color: var(--ok); background: var(--ok-tint); }
+@media (max-width: 560px) { .verdict { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+.fine { font-size: 0.82rem; color: var(--faint); }
+
+/* sample report */
+.report { display: grid; grid-template-columns: 340px minmax(0, 1fr); background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+@media (max-width: 820px) { .report { grid-template-columns: minmax(0, 1fr); } }
+.causes { border-right: 1px solid var(--line); }
+@media (max-width: 820px) { .causes { border-right: 0; border-bottom: 1px solid var(--line); } }
+.causes button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; text-align: left; padding: 14px 18px; border: 0; border-bottom: 1px solid var(--line); background: #fff; font: inherit; cursor: pointer; color: var(--ink); }
+.causes button:last-child { border-bottom: 0; }
+.causes button small { grid-column: 1 / -1; font-family: var(--mono); color: var(--faint); font-size: 0.78rem; }
+.causes button b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.causes button[aria-selected="true"] { background: var(--maroon-tint); box-shadow: inset 3px 0 0 var(--maroon); }
+.cause-detail { padding: 24px 26px; display: grid; gap: 16px; align-content: start; }
+.cause-detail dl { margin: 0; display: grid; gap: 14px; }
+.cause-detail dt { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.cause-detail dd { margin: 4px 0 0; max-width: 62ch; }
+.badge { display: inline-block; font-size: 0.8rem; font-weight: 600; padding: 3px 10px; border-radius: 3px; }
+.badge.auto { background: var(--ok-tint); color: var(--ok); }
+.badge.habit { background: var(--maroon-tint); color: var(--maroon); }
+.fade-in { animation: fade 0.35s ease-out; }
+
+/* commands + safety */
+.two { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 40px; align-items: start; }
+@media (max-width: 860px) { .two { grid-template-columns: minmax(0, 1fr); } }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+table { width: 100%; border-collapse: collapse; min-width: 480px; }
+th, td { text-align: left; padding: 13px 16px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 0.95rem; }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; background: var(--band); }
+td.mono { white-space: nowrap; color: var(--maroon-deep); }
+.pill { font-size: 0.78rem; font-weight: 600; padding: 2px 9px; border-radius: 3px; white-space: nowrap; }
+.pill.ro { background: var(--ok-tint); color: var(--ok); }
+.pill.rw { background: var(--maroon-tint); color: var(--maroon); }
+.checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.checks li { display: grid; grid-template-columns: 22px 1fr; gap: 12px; }
+.checks svg { margin-top: 3px; }
+
+/* install */
+.install { display: grid; gap: 14px; max-width: 760px; }
+.cmd { display: flex; align-items: center; gap: 12px; background: var(--ink); color: #f5eeef; border-radius: 5px; padding: 12px 14px; min-width: 0; }
+.cmd .prompt { color: var(--rose); font-family: var(--mono); flex: none; }
+.cmd pre { margin: 0; flex: 1; min-width: 0; overflow-x: auto; font: 0.92rem/1.6 var(--mono); }
+.cmd button { flex: none; font: 600 0.82rem var(--sans); padding: 6px 12px; border-radius: 3px; border: 1px solid #5a4b4e; background: transparent; color: #f5eeef; cursor: pointer; }
+.cmd button:hover { border-color: var(--rose); }
+.note { font-size: 0.92rem; color: var(--muted); }
+footer { padding-block: 32px; border-top: 1px solid var(--line); color: var(--faint); font-size: 0.85rem; }
+footer .inner { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+footer a { color: var(--muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .link.lit { animation: none; stroke-dasharray: none; }
+  .req .bar, .req .tag { animation: none; transform: none; opacity: 1; }
+  .fade-in { animation: none; }
+}
+</style>
+
+</head>
+<body>
+<div class="topbar">
+  <div class="inner">
+    <a class="brand" href="#top" aria-label="CacheOps home">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="4" fill="#6b1626"/><path d="M7 9h12M7 13h8M7 17h12" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+      CacheOps
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#architecture">How it works</a>
+      <a href="#simulator">Simulator</a>
+      <a href="#report">Sample report</a>
+      <a href="#commands">Commands</a>
+      <a href="#install">Get access</a>
+    </nav>
+  </div>
+</div>
+
+<section class="hero" id="top">
+  <div class="inner">
+    <div class="hero-copy">
+      <span class="kicker">Prompt-cache cost control for Claude Code</span>
+      <h1>Find the money your Claude Code sessions lose to cold caches</h1>
+      <p class="lede">Claude Code re-reads each conversation from a cache at a fraction of the normal price. When the cache expires, the whole conversation is written again at up to 40 times that price. CacheOps shows when that happened, what it cost, and how to stop it.</p>
+      <div class="cta-row">
+        <a class="btn primary" href="#install">Get access</a>
+        <a class="btn ghost" href="#simulator">Try the simulator</a>
+      </div>
+    </div>
+    <aside class="statement" aria-label="Example statement">
+      <header><span>Example · one developer, 30 days</span><b>cacheops scan</b></header>
+      <dl>
+        <div class="row"><dt>Breaks longer than an hour</dt><dd>$19.36</dd></div>
+        <div class="row"><dt>Sessions resumed after a day</dt><dd>$9.03</dd></div>
+        <div class="row"><dt>Session still starting up</dt><dd>$0.30</dd></div>
+      </dl>
+      <div class="total"><span>Lost to cache misses</span><span>$28.69</span></div>
+    </aside>
+  </div>
+</section>
+
+<section class="band alt" id="architecture">
+  <div class="inner">
+    <div class="section-head">
+      <span class="kicker">How it works</span>
+      <h2>CacheOps reads the logs. It never touches your conversation.</h2>
+      <p>Claude Code talks to Anthropic directly, as it always does. Afterwards, CacheOps reads the token counts Claude Code saved on your disk and turns them into a report and fixes.</p>
+    </div>
+    <div class="arch">
+      <div class="diagram-wrap">
+        <svg class="diagram" viewBox="0 0 760 440" role="img" aria-labelledby="diag-title">
+          <title id="diag-title">Your messages go from Claude Code to Anthropic. Claude Code writes token counts to logs on your disk. CacheOps reads those logs and produces a report, fixes, and in-app warnings.</title>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="ah-lit" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b1626"/></marker>
+          </defs>
+          <rect class="zone" x="16" y="20" width="728" height="128" rx="8"/>
+          <text class="zone-label" x="32" y="42">Request path · CacheOps is never here</text>
+
+          <path id="l-you-cc" class="link" d="M170 96 H262" marker-end="url(#ah)"/>
+          <path id="l-cc-api" class="link" d="M462 96 H554" marker-end="url(#ah)"/>
+          <path id="l-cc-logs" class="link" d="M362 128 V218" marker-end="url(#ah)"/>
+          <path id="l-logs-co" class="link" d="M462 250 H554" marker-end="url(#ah)"/>
+          <path id="l-co-out1" class="link" d="M654 282 V318 H180 V348" marker-end="url(#ah)"/>
+          <path id="l-co-out2" class="link" d="M654 282 V348" marker-end="url(#ah)"/>
+          <path id="l-co-out3" class="link" d="M654 282 V318 H420 V348" marker-end="url(#ah)"/>
+
+          <g class="node" id="n-you"><rect x="40" y="66" width="130" height="60" rx="5"/><text x="105" y="94" text-anchor="middle">You</text><text class="sub" x="105" y="113" text-anchor="middle">send a message</text></g>
+          <g class="node" id="n-cc"><rect x="262" y="66" width="200" height="60" rx="5"/><text x="362" y="94" text-anchor="middle">Claude Code</text><text class="sub" x="362" y="113" text-anchor="middle">on your computer</text></g>
+          <g class="node" id="n-api"><rect x="554" y="66" width="180" height="60" rx="5"/><text x="644" y="94" text-anchor="middle">Anthropic API</text><text class="sub" x="644" y="113" text-anchor="middle">reads or re-writes cache</text></g>
+          <g class="node" id="n-logs"><rect x="262" y="218" width="200" height="64" rx="5"/><text x="362" y="246" text-anchor="middle">Session logs</text><text class="sub" x="362" y="266" text-anchor="middle">token counts and times</text></g>
+          <g class="node cacheops" id="n-co"><rect x="554" y="218" width="180" height="64" rx="5"/><text x="644" y="246" text-anchor="middle">CacheOps</text><text class="sub" x="644" y="266" text-anchor="middle">reads logs, read-only</text></g>
+          <g class="node" id="n-out1"><rect x="96" y="348" width="168" height="64" rx="5"/><text x="180" y="376" text-anchor="middle">Report</text><text class="sub" x="180" y="396" text-anchor="middle">cost of each miss</text></g>
+          <g class="node" id="n-out3"><rect x="336" y="348" width="168" height="64" rx="5"/><text x="420" y="376" text-anchor="middle">Fixes</text><text class="sub" x="420" y="396" text-anchor="middle">backed up, undoable</text></g>
+          <g class="node" id="n-out2"><rect x="570" y="348" width="168" height="64" rx="5"/><text x="654" y="376" text-anchor="middle">Live warnings</text><text class="sub" x="654" y="396" text-anchor="middle">status line, resume</text></g>
+        </svg>
+      </div>
+      <div>
+        <ol class="steps" id="steps">
+          <li><button type="button" data-step="0"><div><strong>You send a message</strong><span>Claude Code sends your conversation to Anthropic, as usual.</span></div></button></li>
+          <li><button type="button" data-step="1"><div><strong>The cache is read or re-written</strong><span>Warm cache: a cheap re-read. Cold cache: the whole conversation is written again.</span></div></button></li>
+          <li><button type="button" data-step="2"><div><strong>Claude Code logs the numbers</strong><span>Token counts and timestamps land in its session logs on your disk.</span></div></button></li>
+          <li><button type="button" data-step="3"><div><strong>CacheOps scans the logs</strong><span>It finds each request that re-wrote instead of re-read, and why.</span></div></button></li>
+          <li><button type="button" data-step="4"><div><strong>You get a report and fixes</strong><span>Costs by cause, settings fixes, and warnings inside Claude Code.</span></div></button></li>
+        </ol>
+        <div class="player"><button type="button" id="play">Pause</button><span id="play-state">Playing the steps automatically</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="simulator">
+  <div class="inner">
+    <div class="section-head">
+      <span class="kicker">Simulator</span>
+      <h2>Replay a working session and see where the money goes</h2>
+      <p>Each bar is one request. Pick what happens during the session. The numbers use real list prices and the same rule CacheOps uses to spot a miss.</p>
+    </div>
+    <div class="sim">
+      <div class="sim-controls">
+        <div class="field">
+          <span>What happens</span>
+          <div class="chips" id="scenarios" role="group" aria-label="Scenario"></div>
+        </div>
+        <div class="row-fields">
+          <label class="field" for="model"><span>Model</span>
+            <select id="model">
+              <option value="opus55">Claude Opus 5.5 · $4 / M input</option>
+              <option value="sonnet55">Claude Sonnet 5.5 · $2 / M input</option>
+              <option value="opus5">Claude Opus 5 · $5 / M input</option>
+              <option value="sonnet46">Claude Sonnet 4.6 · $3 / M input</option>
+              <option value="haiku45">Claude Haiku 4.5 · $1 / M input</option>
+            </select>
+          </label>
+          <label class="field" for="start"><span>Conversation size at the start</span>
+            <select id="start">
+              <option value="40000">Small · 40K tokens</option>
+              <option value="150000" selected>Medium · 150K tokens</option>
+              <option value="400000">Large · 400K tokens</option>
+            </select>
+          </label>
+          <div class="field"><span>Cache lifetime</span>
+            <div class="seg" role="group" aria-label="Cache lifetime"><button type="button" data-ttl="5" aria-pressed="false">5 minutes</button><button type="button" data-ttl="60" aria-pressed="true">1 hour</button></div>
+          </div>
+        </div>
+        <label class="toggle" for="compact"><input type="checkbox" id="compact"> Run <code>/compact</code> before the break</label>
+      </div>
+      <div class="sim-body">
+        <p class="story" id="story" aria-live="polite"></p>
+        <div class="chart-wrap"><div class="chart" id="chart" aria-label="Cost of each request"></div></div>
+        <div class="axis"><span>Start of session</span><span>Hover a bar for details</span><span>End</span></div>
+        <div class="legend">
+          <span><i style="background:#c9c0c1"></i>First request (always written)</span>
+          <span><i style="background:var(--rose)"></i>Cache warm: re-read</span>
+          <span><i style="background:var(--maroon)"></i>Cache miss: re-written</span>
+          <span><i style="background:var(--ok)"></i>/compact</span>
+        </div>
+        <div class="figures">
+          <div class="figure"><span>This session cost</span><b id="f-total"></b></div>
+          <div class="figure"><span>If the cache had stayed warm</span><b id="f-warm"></b></div>
+          <div class="figure loss"><span>Lost to cache misses</span><b id="f-lost"></b></div>
+        </div>
+        <div class="verdict" id="verdict"></div>
+        <p class="fine">Input-side cost only (cache reads and writes); output is the same in every scenario. Each request adds about 6K tokens. Cache writes cost 1.25× the input price for a 5-minute lifetime and 2× for 1 hour; reads cost 0.05× on Opus and Sonnet 5.5, 0.1× on the others. /compact is modelled as one warm re-read plus a 4K-token summary, leaving about 20K tokens.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band alt" id="report">
+  <div class="inner">
+    <div class="section-head">
+      <span class="kicker">Sample report</span>
+      <h2>Every miss gets a cause, a price and a next step</h2>
+      <p>Select a cause to see what CacheOps looked at and what you can do about it. Some fixes are a setting CacheOps changes for you. Others are a habit, and CacheOps warns you at the right moment.</p>
+    </div>
+    <div class="report">
+      <div class="causes" id="causes" role="tablist" aria-label="Causes"></div>
+      <div class="cause-detail" id="cause-detail" role="tabpanel" tabindex="0"></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="commands">
+  <div class="inner two">
+    <div>
+      <div class="section-head">
+        <span class="kicker">Commands</span>
+        <h2>Four commands cover it</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>What it does</th><th>Files</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">cacheops scan --since 30d</td><td>Shows what cache misses cost you, and why</td><td><span class="pill ro">Read only</span></td></tr>
+            <tr><td class="mono">cacheops fix</td><td>Lists the fixes it would make</td><td><span class="pill ro">Read only</span></td></tr>
+            <tr><td class="mono">cacheops fix --apply</td><td>Makes those fixes, after a backup</td><td><span class="pill rw">Writes, backed up</span></td></tr>
+            <tr><td class="mono">cacheops fix --undo</td><td>Puts everything back</td><td><span class="pill rw">Restores backup</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <div class="section-head">
+        <span class="kicker">Safety</span>
+        <h2>Built for work laptops</h2>
+      </div>
+      <ul class="checks">
+        <li><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="#6b1626"/><path d="M5 9.2l2.6 2.6L13 6.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Reads token counts and timestamps. Never your prompts, responses or code.</span></li>
+        <li><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="#6b1626"/><path d="M5 9.2l2.6 2.6L13 6.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Never uploads anything and never touches your Claude Code login.</span></li>
+        <li><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="#6b1626"/><path d="M5 9.2l2.6 2.6L13 6.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Not a proxy: it never sits between Claude Code and Anthropic.</span></li>
+        <li><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="9" fill="#6b1626"/><path d="M5 9.2l2.6 2.6L13 6.5" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Changes files only with <code>--apply</code>, backs them up first, and <code>--undo</code> restores them.</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="band alt" id="install">
+  <div class="inner">
+    <div class="section-head">
+      <span class="kicker">Evaluation access</span>
+      <h2>Available to invited evaluators</h2>
+      <p>CacheOps is proprietary software in private evaluation. Invited evaluators receive a package file and a personal licence key. You need Node.js 20 or newer; check with <code>node --version</code>.</p>
+    </div>
+    <div class="install">
+      <div class="cmd"><span class="prompt">1</span><pre id="c1">npm i -g ./cacheops-0.4.0.tgz</pre><button type="button" data-copy="c1">Copy</button></div>
+      <div class="cmd"><span class="prompt">2</span><pre id="c2">cacheops license activate &lt;your key&gt; --accept-terms</pre><button type="button" data-copy="c2">Copy</button></div>
+      <div class="cmd"><span class="prompt">3</span><pre id="c3">cacheops scan --since 30d</pre><button type="button" data-copy="c3">Copy</button></div>
+      <div class="cmd"><span class="prompt">4</span><pre id="c5">cacheops fix</pre><button type="button" data-copy="c5">Copy</button></div>
+      <p class="note">Activating accepts the CacheOps Evaluation Agreement; read it with <code>cacheops license terms</code>. The licence check runs offline on your computer. To remove CacheOps, undo any changes first, then uninstall:</p>
+      <div class="cmd"><span class="prompt">×</span><pre id="c4">cacheops fix --undo
+cacheops license remove
+npm uninstall -g cacheops</pre><button type="button" data-copy="c4">Copy</button></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="inner"><span>CacheOps · Copyright (c) 2026 Eric Hibbs. All rights reserved.</span><span>Proprietary software. Copying, redistribution or reverse engineering is prohibited.</span></div>
+</footer>
+
+<script>
+(function () {
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ---------- architecture walk-through ---------- */
+  var STEPS = [
+    { nodes: ['n-you', 'n-cc'], links: ['l-you-cc'] },
+    { nodes: ['n-cc', 'n-api'], links: ['l-cc-api'] },
+    { nodes: ['n-cc', 'n-logs'], links: ['l-cc-logs'] },
+    { nodes: ['n-logs', 'n-co'], links: ['l-logs-co'] },
+    { nodes: ['n-co', 'n-out1', 'n-out2', 'n-out3'], links: ['l-co-out1', 'l-co-out2', 'l-co-out3'] }
+  ];
+  var stepButtons = Array.prototype.slice.call(document.querySelectorAll('#steps button'));
+  var current = 0, timer = null, playing = !reduce;
+  function show(i) {
+    current = i;
+    document.querySelectorAll('.diagram .lit').forEach(function (el) { el.classList.remove('lit'); el.setAttribute && el.getAttribute('marker-end') && el.setAttribute('marker-end', 'url(#ah)'); });
+    STEPS[i].nodes.forEach(function (id) { document.getElementById(id).classList.add('lit'); });
+    STEPS[i].links.forEach(function (id) { var l = document.getElementById(id); l.classList.add('lit'); l.setAttribute('marker-end', 'url(#ah-lit)'); });
+    stepButtons.forEach(function (b, j) { if (j === i) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current'); });
+  }
+  function schedule() { clearInterval(timer); if (playing) timer = setInterval(function () { show((current + 1) % STEPS.length); }, 2800); }
+  var playBtn = document.getElementById('play'), playState = document.getElementById('play-state');
+  function setPlaying(p) { playing = p; playBtn.textContent = p ? 'Pause' : 'Play'; playState.textContent = p ? 'Playing the steps automatically' : 'Paused. Select a step to see it.'; schedule(); }
+  stepButtons.forEach(function (b, j) { b.addEventListener('click', function () { show(j); setPlaying(false); }); });
+  playBtn.addEventListener('click', function () { setPlaying(!playing); });
+  show(0); setPlaying(playing);
+
+  /* ---------- simulator ---------- */
+  var MODELS = {
+    opus55: { name: 'Claude Opus 5.5', base: 4, read: 0.05 },
+    sonnet55: { name: 'Claude Sonnet 5.5', base: 2, read: 0.05 },
+    opus5: { name: 'Claude Opus 5', base: 5, read: 0.1 },
+    sonnet46: { name: 'Claude Sonnet 4.6', base: 3, read: 0.1 },
+    haiku45: { name: 'Claude Haiku 4.5', base: 1, read: 0.1 }
+  };
+  var STEADY = 2; // minutes between requests while working
+  var SCENARIOS = [
+    { id: 'steady', label: 'Steady work', gap: null, story: 'You work without a break. Every request after the first re-reads the conversation from the cache.' },
+    { id: 'coffee', label: 'Coffee break · 10 min', gap: 10, story: 'You step away for 10 minutes, then carry on.' },
+    { id: 'lunch', label: 'Lunch · 75 min', gap: 75, story: 'You go to lunch for 75 minutes, then carry on in the same session.' },
+    { id: 'overnight', label: 'Next morning · 16 h', gap: 960, story: 'You stop for the evening and continue the same session the next morning.' },
+    { id: 'resume', label: 'Resume after 3 days', gap: 4320, story: 'You resume a session you last used three days ago.' },
+    { id: 'switch', label: 'Switch model', gap: null, switchAt: 6, story: 'Halfway through you switch models with /model, then carry on.' }
+  ];
+  var state = { scenario: 'lunch', model: 'opus55', start: 150000, ttl: 60, compact: false };
+  var GROWTH = 6000, COMPACTED = 20000, SUMMARY_OUT = 4000, BEFORE = 6, AFTER = 6;
+
+  var chipsEl = document.getElementById('scenarios');
+  SCENARIOS.forEach(function (s) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = s.label; b.dataset.id = s.id;
+    b.addEventListener('click', function () { state.scenario = s.id; render(); });
+    chipsEl.appendChild(b);
+  });
+  document.getElementById('model').addEventListener('change', function (e) { state.model = e.target.value; render(); });
+  document.getElementById('start').addEventListener('change', function (e) { state.start = Number(e.target.value); render(); });
+  document.getElementById('compact').addEventListener('change', function (e) { state.compact = e.target.checked; render(); });
+  document.querySelectorAll('.seg button').forEach(function (b) { b.addEventListener('click', function () { state.ttl = Number(b.dataset.ttl); render(); }); });
+
+  function money(v) { return v < 0.005 ? '$0.00' : '$' + v.toFixed(2); }
+  function tok(n) { return Math.round(n / 1000) + 'K'; }
+  function dur(min) { if (min < 120) return min + ' min'; if (min < 1440) return Math.round(min / 60 * 10) / 10 + ' h'; return Math.round(min / 1440 * 10) / 10 + ' days'; }
+
+  /** Builds the session request by request, the way CacheOps classifies it. */
+  function simulate() {
+    var sc = SCENARIOS.filter(function (s) { return s.id === state.scenario; })[0];
+    var m = MODELS[state.model], other = state.model === 'sonnet55' ? MODELS.opus55 : MODELS.sonnet55;
+    var write = state.ttl === 5 ? 1.25 : 2;
+    var reqs = [], prefix = state.start, model = m, lastModel = m;
+    var total = 0, warmTotal = 0, lost = 0, cause = null, compacted = false;
+    for (var i = 0; i < BEFORE + AFTER; i++) {
+      var gap = i === 0 ? 0 : (i === BEFORE && sc.gap ? sc.gap : STEADY);
+      if (sc.switchAt && i >= sc.switchAt) model = other;
+      var per = model.base / 1e6;
+      if (i === BEFORE && sc.gap && state.compact && sc.gap > state.ttl) {
+        // /compact just before leaving: one warm re-read plus a short summary (output is 5x input).
+        var cc = prefix * model.read * per + SUMMARY_OUT * 5 * per;
+        reqs.push({ kind: 'compact', cost: cc, note: '/compact: ' + tok(prefix) + ' summarized to ' + tok(COMPACTED) });
+        total += cc; warmTotal += cc; prefix = COMPACTED; compacted = true;
+      }
+      var r;
+      if (i === 0) {
+        var c0 = (prefix + GROWTH) * write * per;
+        r = { kind: 'first', cost: c0, note: 'First request writes ' + tok(prefix + GROWTH) + ' to the cache' };
+        warmTotal += c0;
+      } else {
+        var expired = gap > state.ttl, switched = model !== lastModel;
+        var warmCost = prefix * model.read * per + GROWTH * write * per;
+        if (expired || switched) {
+          var cost = (prefix + GROWTH) * write * per;
+          var waste = prefix * (write - model.read) * per;
+          var code = switched ? 'model_switch' : gap >= 1440 ? 'stale_resume' : state.ttl === 5 ? 'ttl_expired_5m' : 'ttl_expired_1h';
+          r = { kind: 'miss', cost: cost, waste: waste, code: code, note: 'Cache miss (' + code + '): re-wrote ' + tok(prefix) + ' after ' + (switched ? 'a model switch' : dur(gap)) };
+          lost += waste; cause = cause || code;
+          warmTotal += warmCost;
+        } else {
+          r = { kind: 'hit', cost: warmCost, note: 'Re-read ' + tok(prefix) + ', wrote ' + tok(GROWTH) + ' new' };
+          warmTotal += warmCost;
+        }
+      }
+      r.gap = gap; r.index = i;
+      total += r.cost; reqs.push(r);
+      prefix += GROWTH; lastModel = model;
+    }
+    return { sc: sc, reqs: reqs, total: total, warm: warmTotal, lost: lost, cause: cause, compacted: compacted, model: m };
+  }
+
+  var FIXES = {
+    ttl_expired_1h: 'Compact before breaks of an hour or more, or start fresh. No setting keeps a cache warm past an hour.',
+    ttl_expired_5m: 'Pauses over 5 minutes expire this cache. CacheOps checks your history and sets a 1-hour lifetime when it pays off.',
+    stale_resume: 'Start a new session instead of resuming an old one. The resume warning shows this cost before you send anything.',
+    model_switch: 'Use a subagent for the other model instead of /model, so the main conversation keeps its cache.'
+  };
+
+  function render() {
+    document.querySelectorAll('#scenarios button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.id === state.scenario)); });
+    document.querySelectorAll('.seg button').forEach(function (b) { b.setAttribute('aria-pressed', String(Number(b.dataset.ttl) === state.ttl)); });
+    var sim = simulate();
+    var compactNA = !(sim.sc.gap && sim.sc.gap > state.ttl);
+    var box = document.getElementById('compact'); box.disabled = compactNA; box.parentNode.style.opacity = compactNA ? 0.5 : 1;
+
+    var chart = document.getElementById('chart'); chart.textContent = '';
+    var max = Math.max.apply(null, sim.reqs.map(function (r) { return r.cost; }));
+    sim.reqs.forEach(function (r, k) {
+      if (r.kind !== 'compact' && r.gap > STEADY) {
+        var g = document.createElement('div'); g.className = 'gapmark';
+        var gs = document.createElement('span'); gs.textContent = dur(r.gap) + ' away'; g.appendChild(gs); chart.appendChild(g);
+      }
+      var el = document.createElement('div'); el.className = 'req ' + r.kind + (k < 3 ? ' edge-l' : k > sim.reqs.length - 4 ? ' edge-r' : ''); el.tabIndex = 0;
+      var bar = document.createElement('div'); bar.className = 'bar';
+      bar.style.height = Math.max(2, r.cost / max * 100) + '%';
+      bar.style.animationDelay = reduce ? '0s' : (k * 0.05) + 's';
+      el.appendChild(bar);
+      if (r.kind === 'miss') { var t = document.createElement('span'); t.className = 'tag'; t.textContent = 'miss'; t.style.bottom = 'calc(' + (r.cost / max * 100) + '% + 4px)'; t.style.animationDelay = bar.style.animationDelay; el.appendChild(t); }
+      var tip = document.createElement('div'); tip.className = 'tip'; tip.textContent = r.note + ' · ' + money(r.cost); el.appendChild(tip);
+      el.setAttribute('aria-label', r.note + ', ' + money(r.cost));
+      chart.appendChild(el);
+    });
+
+    document.getElementById('f-total').textContent = money(sim.total);
+    document.getElementById('f-warm').textContent = money(sim.warm);
+    document.getElementById('f-lost').textContent = money(sim.lost);
+
+    var story = sim.sc.story;
+    if (sim.sc.gap && sim.sc.gap <= state.ttl) story += ' The break is shorter than the cache lifetime, so nothing is lost.';
+    else if (sim.compacted) story += ' Because you ran /compact first, only about 20K tokens are re-written when you return.';
+    document.getElementById('story').textContent = story;
+
+    var v = document.getElementById('verdict'); v.textContent = '';
+    var label = document.createElement('span'); label.className = 'mono';
+    var p = document.createElement('p');
+    if (sim.cause) {
+      v.className = 'verdict';
+      label.textContent = sim.cause;
+      p.textContent = 'CacheOps would report ' + money(sim.lost) + ' lost to ' + sim.cause + '. Fix: ' + FIXES[sim.cause];
+    } else {
+      v.className = 'verdict clean';
+      label.textContent = 'no misses';
+      p.textContent = sim.compacted ? 'Compacting first turned an expensive re-write into a small one.' : 'Every request re-read the cache. This is the cheapest way to work.';
+    }
+    v.appendChild(label); v.appendChild(p);
+  }
+  render();
+
+  /* ---------- sample report ---------- */
+  var CAUSES = [
+    { code: 'ttl_expired_1h', title: 'Breaks longer than an hour', usd: '$19.36', misses: 12, what: 'You stepped away for more than an hour in the middle of a session. The cache expired, so the next message re-wrote the whole conversation.', evidence: 'The gap between two requests was longer than the cache lifetime the previous request used.', action: 'Run /compact before you step away, so less needs re-writing. The status line shows how long the cache has left.', auto: false },
+    { code: 'stale_resume', title: 'Resuming sessions after a day or more', usd: '$9.03', misses: 2, what: 'You resumed a session you last used days ago. Nothing was cached any more, so the full history was written again.', evidence: 'The gap between two requests was 24 hours or more.', action: 'Start a new session instead. The resume warning shows the cost before you send your first message.', auto: false },
+    { code: 'model_switch', title: 'Switching models mid-session', usd: '$2.99', misses: 1, what: 'You switched models with /model. Each model keeps its own cache, so the conversation was re-written for the new one.', evidence: 'The model on a request differed from the model on the request before it.', action: 'Hand the other-model work to a subagent and keep the main conversation on one model.', auto: false },
+    { code: 'tools_or_config_changed', title: 'Settings changed during a session', usd: '$0.84', misses: 1, what: 'A cache-relevant setting or MCP server list changed while the session was running, which changes what Claude Code sends first.', evidence: 'Saved snapshots of your settings show a relevant key changed between the two requests.', action: 'CacheOps fixes settings that work against caching. Make other config changes between sessions.', auto: true },
+    { code: 'session_startup', title: 'Session still starting up', usd: '$0.30', misses: 1, what: 'The cache was rebuilt within the first minutes of a session, usually because MCP servers finished connecting after the first message.', evidence: 'No other cause applied, and the miss came within 3 minutes of the session starting.', action: 'Wait until /mcp shows every server connected before your first prompt.', auto: false }
+  ];
+  var list = document.getElementById('causes'), detail = document.getElementById('cause-detail');
+  function select(i) {
+    list.querySelectorAll('button').forEach(function (b, j) { b.setAttribute('aria-selected', String(i === j)); b.tabIndex = i === j ? 0 : -1; });
+    var c = CAUSES[i];
+    detail.className = 'cause-detail fade-in'; void detail.offsetWidth;
+    detail.innerHTML = '';
+    var h = document.createElement('h3'); h.textContent = c.title + ' · ' + c.usd; detail.appendChild(h);
+    var badge = document.createElement('span'); badge.className = 'badge ' + (c.auto ? 'auto' : 'habit');
+    badge.textContent = c.auto ? 'cacheops fix handles this' : 'A habit: CacheOps warns you'; detail.appendChild(badge);
+    var dl = document.createElement('dl');
+    [['What happened', c.what], ['How CacheOps knows', c.evidence], ['What to do', c.action]].forEach(function (pair) {
+      var wrap = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
+      dt.textContent = pair[0]; dd.textContent = pair[1]; wrap.appendChild(dt); wrap.appendChild(dd); dl.appendChild(wrap);
+    });
+    detail.appendChild(dl);
+  }
+  CAUSES.forEach(function (c, i) {
+    var b = document.createElement('button'); b.type = 'button'; b.setAttribute('role', 'tab');
+    var t = document.createElement('span'); t.textContent = c.title;
+    var u = document.createElement('b'); u.textContent = c.usd;
+    var s = document.createElement('small'); s.textContent = c.code + ' · ' + c.misses + (c.misses === 1 ? ' miss' : ' misses');
+    b.appendChild(t); b.appendChild(u); b.appendChild(s);
+    b.addEventListener('click', function () { select(i); });
+    b.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); var n = (i + (e.key === 'ArrowDown' ? 1 : CAUSES.length - 1)) % CAUSES.length; select(n); list.querySelectorAll('button')[n].focus(); }
+    });
+    list.appendChild(b);
+  });
+  select(0);
+
+  /* ---------- copy buttons ---------- */
+  document.querySelectorAll('[data-copy]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var el = document.getElementById(b.dataset.copy);
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500); };
+      var fallback = function () { var r = document.createRange(); r.selectNodeContents(el); var s = getSelection(); s.removeAllRanges(); s.addRange(r); b.textContent = 'Press Ctrl+C'; };
+      try { navigator.clipboard.writeText(el.textContent).then(done, fallback); } catch (e) { fallback(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>
